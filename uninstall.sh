@@ -6,6 +6,7 @@ BIN_DIR="${HOME}/.local/bin"
 BIN_LINK="${BIN_DIR}/${NAME}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/${NAME}"
 WAYBAR_CONFIG="${HOME}/.config/waybar/config.jsonc"
+WAYBAR_SNIPPET="$CONFIG_DIR/waybar-module.jsonc"
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/${NAME}"
 
 echo "==> Uninstalling $NAME..."
@@ -26,7 +27,13 @@ if [ -d "$STATE_DIR" ]; then
     echo "  - Removed state directory: $STATE_DIR"
 fi
 
-# 3. Remove config
+# 3. Remove generated Waybar snippet
+if [ -f "$WAYBAR_SNIPPET" ]; then
+    rm -f "$WAYBAR_SNIPPET"
+    echo "  - Removed Waybar snippet: $WAYBAR_SNIPPET"
+fi
+
+# 4. Remove config
 if [ -d "$CONFIG_DIR" ]; then
     echo ""
     echo "Config directory found: $CONFIG_DIR"
@@ -39,7 +46,7 @@ if [ -d "$CONFIG_DIR" ]; then
     fi
 fi
 
-# 4. Restore Waybar config from backup
+# 5. Restore legacy Waybar config backup if present
 if [ -f "${WAYBAR_CONFIG}.bak" ]; then
     echo ""
     echo "Waybar backup found: ${WAYBAR_CONFIG}.bak"
@@ -48,39 +55,20 @@ if [ -f "${WAYBAR_CONFIG}.bak" ]; then
         cp "${WAYBAR_CONFIG}.bak" "$WAYBAR_CONFIG"
         echo "  + Restored $WAYBAR_CONFIG from backup"
     else
-        # Try to remove the module entries from the config
-        read -r -p "Remove tomatina entries from current Waybar config? [y/N] " confirm2
-        if [ "$confirm2" = "y" ] || [ "$confirm2" = "Y" ]; then
-            awk '
-            /"custom\/tomatina"/ { skip_module = 1 }
-            skip_module && /^    },?$/ { skip_module = 0; next }
-            !skip_module { print }
-            ' "$WAYBAR_CONFIG" > "${WAYBAR_CONFIG}.tmp"
-            mv "${WAYBAR_CONFIG}.tmp" "$WAYBAR_CONFIG"
-            echo "  - Removed tomatina module from Waybar config"
-        fi
+        echo "  ~ Kept current Waybar config. Remove custom/tomatina entries manually if needed."
     fi
 elif [ -f "$WAYBAR_CONFIG" ]; then
-    echo ""
-    read -r -p "Remove tomatina entries from current Waybar config? (no backup found) [y/N] " confirm
-    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-        awk '
-        /"custom\/tomatina/ { skip_module = 1 }
-        skip_module && /^    },?$/ { skip_module = 0; next }
-        !skip_module { print }
-        ' "$WAYBAR_CONFIG" > "${WAYBAR_CONFIG}.tmp"
-        mv "${WAYBAR_CONFIG}.tmp" "$WAYBAR_CONFIG"
-        echo "  - Removed tomatina module from Waybar config"
-    fi
+    echo "  ~ Waybar config found at $WAYBAR_CONFIG"
+    echo "    Remove any custom/tomatina entries manually if you added them."
 fi
 
-# 5. Restart Waybar
+# 6. Restart Waybar
 if command -v omarchy-restart-waybar &>/dev/null; then
     echo "  ~ Restarting Waybar..."
-    omarchy-restart-waybar
+    omarchy-restart-waybar || echo "  ! Waybar restart failed; restart it manually if needed"
 elif command -v systemctl &>/dev/null && systemctl --user status waybar &>/dev/null 2>&1; then
     echo "  ~ Restarting Waybar..."
-    systemctl --user restart waybar
+    systemctl --user restart waybar || echo "  ! Waybar restart failed; restart it manually if needed"
 fi
 
 echo ""

@@ -4,6 +4,7 @@ set -e
 NAME="tomatina"
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/${NAME}"
 STATE_FILE="$STATE_DIR/state"
+LOCK_FILE="$STATE_DIR/lock"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/${NAME}"
 CONFIG_FILE="$CONFIG_DIR/config"
 
@@ -20,20 +21,29 @@ CLR_BLUE="#89b4fa"
 CLR_SUBTEXT="#bac2de"
 CLR_OVERLAY="#585b70"
 
-cleanup() { rm -f "$LOCK_FILE"; }
+cleanup() { [ -n "${LOCK_FILE:-}" ] && rm -f "$LOCK_FILE"; }
 lock() {
     mkdir -p "$STATE_DIR"
-    if ! ln -s "$$" "$LOCK_FILE" 2>/dev/null; then
-        local pid
-        pid=$(readlink "$LOCK_FILE" 2>/dev/null || echo 0)
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "$NAME: Another instance running (pid $pid)" >&2
-            exit 1
+    local attempt pid
+    for attempt in {1..50}; do
+        if ln -s "$$" "$LOCK_FILE" 2>/dev/null; then
+            trap cleanup EXIT
+            return 0
         fi
-        rm -f "$LOCK_FILE"
-        ln -s "$$" "$LOCK_FILE" 2>/dev/null || true
-    fi
-    trap cleanup EXIT
+        pid=$(readlink "$LOCK_FILE" 2>/dev/null || echo 0)
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$LOCK_FILE"
+            continue
+        fi
+        sleep 0.05
+    done
+    echo "$NAME: Timed out waiting for state lock" >&2
+    exit 1
+}
+
+unlock() {
+    rm -f "$LOCK_FILE"
+    trap - EXIT
 }
 
 init() {
@@ -44,13 +54,64 @@ load_config() {
     [ -f "$CONFIG_FILE" ] || return 0
     while IFS='=' read -r key value; do
         case "$key" in
-            work_duration)          WORK_DURATION="${value:-20}" ;;
-            recap_break_duration)   RECAP_BREAK_DURATION="${value:-5}" ;;
-            deep_break_duration)    DEEP_BREAK_DURATION="${value:-5}" ;;
-            bar)                    BAR="${value:-waybar}" ;;
+            work_duration)          is_positive_int "$value" && WORK_DURATION="$value" ;;
+            recap_break_duration)   is_positive_int "$value" && RECAP_BREAK_DURATION="$value" ;;
+            deep_break_duration)    is_positive_int "$value" && DEEP_BREAK_DURATION="$value" ;;
+            bar)                    is_valid_bar "$value" && BAR="$value" ;;
             cmd)                    CMD="$value" ;;
         esac
     done < <(grep -v '^\s*#' "$CONFIG_FILE" 2>/dev/null | grep -v '^\s*$' || true)
+}
+
+is_positive_int() {
+    [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
+}
+
+is_valid_bar() {
+    case "${1:-}" in
+        waybar|swaybar|polybar|json|text) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_config_value() {
+    local key="$1" value="$2"
+    case "$key" in
+        work_duration|recap_break_duration|deep_break_duration)
+            if ! is_positive_int "$value"; then
+                echo "$NAME: $key must be a positive integer number of minutes" >&2
+                return 1
+            fi
+            ;;
+        bar)
+            if ! is_valid_bar "$value"; then
+                echo "$NAME: bar must be one of: waybar, swaybar, polybar, json, text" >&2
+                return 1
+            fi
+            ;;
+        cmd) ;;
+        *)
+            echo "$NAME: Unknown config key '$key'" >&2
+            return 1
+            ;;
+    esac
+}
+
+set_config_value() {
+    local key="$1" value="$2" tmp found=false
+    tmp=$(mktemp)
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" == "$key="* ]]; then
+            printf '%s=%s\n' "$key" "$value" >> "$tmp"
+            found=true
+        else
+            printf '%s\n' "$line" >> "$tmp"
+        fi
+    done < "$CONFIG_FILE"
+    if ! $found; then
+        printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    fi
+    mv "$tmp" "$CONFIG_FILE"
 }
 
 read_state() {
@@ -228,8 +289,18 @@ cmd_start() {
     local cmd_override=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --cmd) cmd_override="$2"; shift 2 ;;
-            *) shift ;;
+            --cmd)
+                if [ $# -lt 2 ]; then
+                    echo "Usage: $NAME start [--cmd <command>]" >&2
+                    exit 1
+                fi
+                cmd_override="$2"
+                shift 2
+                ;;
+            *)
+                echo "$NAME: Unknown start option '$1'" >&2
+                exit 1
+                ;;
         esac
     done
 
@@ -237,6 +308,7 @@ cmd_start() {
     duration=$(cycle_duration 0)
     end_at=$(( $(now) + duration ))
 
+    lock
     STATUS="working"
     REMAINING=$duration
     END_AT=$end_at
@@ -249,21 +321,25 @@ cmd_start() {
         rm -f "$STATE_DIR/cmd_override"
     fi
 
+    unlock
     signal_bar
     echo "🍅 $NAME: Work session started ($WORK_DURATION min)"
 }
 
 cmd_stop() {
     init
+    lock
     STATUS="idle"; REMAINING=0; END_AT=0; CYCLE=0
     write_state
     rm -f "$STATE_DIR/cmd_override" 2>/dev/null || true
+    unlock
     signal_bar
     echo "$NAME: Timer stopped"
 }
 
 cmd_toggle() {
     init
+    lock
     read_state
 
     if [ "$STATUS" = "paused" ]; then
@@ -275,15 +351,18 @@ cmd_toggle() {
         END_AT=$(( $(now) + REMAINING ))
         STATUS=$(cycle_name "$CYCLE")
         write_state
+        unlock
         signal_bar
         echo "$NAME: Resumed"
     elif [ "$STATUS" = "idle" ]; then
+        unlock
         cmd_start "$@"
     else
         local rem=$((END_AT - $(now)))
         [ "$rem" -lt 0 ] && rem=0
         STATUS="paused"; REMAINING=$rem; END_AT=0
         write_state
+        unlock
         signal_bar
         echo "$NAME: Paused"
     fi
@@ -291,9 +370,11 @@ cmd_toggle() {
 
 cmd_status() {
     init
+    lock
     read_state
     tick
     write_state
+    unlock
 
     local bar="$BAR"
     while [ $# -gt 0 ]; do
@@ -334,9 +415,11 @@ cmd_daemon() {
     fi
 
     while true; do
+        lock
         read_state
         tick
         write_state
+        unlock
 
         case "$bar" in
             waybar)
@@ -386,15 +469,12 @@ EOF
             ;;
         set)
             local key="$2" value="$3"
-            if [ -z "$key" ] || [ -z "$value" ]; then
+            if [ -z "$key" ] || [ $# -lt 3 ]; then
                 echo "Usage: $NAME config set <key> <value>" >&2
                 exit 1
             fi
-            if grep -q "^$key=" "$CONFIG_FILE" 2>/dev/null; then
-                sed -i "s|^$key=.*|$key=$value|" "$CONFIG_FILE"
-            else
-                echo "$key=$value" >> "$CONFIG_FILE"
-            fi
+            validate_config_value "$key" "$value"
+            set_config_value "$key" "$value"
             echo "$NAME: $key = $value"
             ;;
         interactive|"")
@@ -409,15 +489,29 @@ EOF
 
             local input
             read -r -p "Work duration (minutes) [$WORK_DURATION]: " input
-            [ -n "$input" ] && sed -i "s/^work_duration=.*/work_duration=$input/" "$tmp"
+            if [ -n "$input" ]; then
+                validate_config_value work_duration "$input"
+                sed -i "s/^work_duration=.*/work_duration=$input/" "$tmp"
+            fi
             read -r -p "Recap break duration (minutes) [$RECAP_BREAK_DURATION]: " input
-            [ -n "$input" ] && sed -i "s/^recap_break_duration=.*/recap_break_duration=$input/" "$tmp"
+            if [ -n "$input" ]; then
+                validate_config_value recap_break_duration "$input"
+                sed -i "s/^recap_break_duration=.*/recap_break_duration=$input/" "$tmp"
+            fi
             read -r -p "Deep break duration (minutes) [$DEEP_BREAK_DURATION]: " input
-            [ -n "$input" ] && sed -i "s/^deep_break_duration=.*/deep_break_duration=$input/" "$tmp"
+            if [ -n "$input" ]; then
+                validate_config_value deep_break_duration "$input"
+                sed -i "s/^deep_break_duration=.*/deep_break_duration=$input/" "$tmp"
+            fi
             read -r -p "Status bar (waybar/swaybar/polybar) [$BAR]: " input
-            [ -n "$input" ] && sed -i "s/^bar=.*/bar=$input/" "$tmp"
+            if [ -n "$input" ]; then
+                validate_config_value bar "$input"
+                sed -i "s/^bar=.*/bar=$input/" "$tmp"
+            fi
             read -r -p "Post-work command [$CMD]: " input
-            [ -n "$input" ] && sed -i "s|^cmd=.*|cmd=$input|" "$tmp"
+            if [ -n "$input" ]; then
+                CONFIG_FILE="$tmp" set_config_value cmd "$input"
+            fi
 
             mv "$tmp" "$CONFIG_FILE"
             echo "$NAME: Configuration updated."

@@ -9,6 +9,7 @@ BIN_LINK="${BIN_DIR}/${NAME}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/${NAME}"
 CONFIG_FILE="$CONFIG_DIR/config"
 WAYBAR_CONFIG="${HOME}/.config/waybar/config.jsonc"
+WAYBAR_SNIPPET="$CONFIG_DIR/waybar-module.jsonc"
 
 if [ ! -f "$SCRIPT_SRC" ]; then
     echo "Error: $SCRIPT_SRC not found. Run this script from the repo directory." >&2
@@ -56,16 +57,8 @@ if grep -q "^bar=" "$CONFIG_FILE" 2>/dev/null; then
     fi
 fi
 
-# 4. Patch Waybar config
-if [ -f "$WAYBAR_CONFIG" ]; then
-    if grep -q '"custom/tomatina"' "$WAYBAR_CONFIG" 2>/dev/null; then
-        echo "  ~ Waybar module already exists in config"
-    else
-        cp "$WAYBAR_CONFIG" "${WAYBAR_CONFIG}.bak"
-        echo "  + Backed up $WAYBAR_CONFIG -> ${WAYBAR_CONFIG}.bak"
-
-        # Insert the tomatina module into modules-right (before closing brace of the array)
-        MODULE_ENTRY=$(cat <<'MODULE'
+# 4. Write Waybar snippet and print integration instructions
+cat > "$WAYBAR_SNIPPET" <<'MODULE'
     "custom/tomatina": {
         "exec": "$HOME/.local/bin/tomatina",
         "return-type": "json",
@@ -75,44 +68,25 @@ if [ -f "$WAYBAR_CONFIG" ]; then
         "signal": 14
     }
 MODULE
-)
+echo "  + Wrote Waybar module snippet: $WAYBAR_SNIPPET"
 
-        # Find the last module in modules-right array and add tomatina after it
-        awk '
-        /"modules-right":\s*\[/ { in_right = 1; print; next }
-        in_right && /\]/ {
-            in_right = 0
-            print "    \"custom/tomatina\","
-            print
-            next
-        }
-        { print }
-        ' "$WAYBAR_CONFIG" > "${WAYBAR_CONFIG}.tmp"
-
-        # Now insert the module definition before the closing brace of the config
-        awk -v module="$MODULE_ENTRY" '
-        /^}/ && !found {
-            print ","
-            print module
-            found = 1
-        }
-        { print }
-        ' "${WAYBAR_CONFIG}.tmp" > "$WAYBAR_CONFIG"
-
-        rm -f "${WAYBAR_CONFIG}.tmp"
-        echo "  + Added custom/tomatina module to Waybar config"
-    fi
+if [ -f "$WAYBAR_CONFIG" ] && grep -q '"custom/tomatina"' "$WAYBAR_CONFIG" 2>/dev/null; then
+    echo "  ~ Waybar module already exists in $WAYBAR_CONFIG"
+elif [ -f "$WAYBAR_CONFIG" ]; then
+    echo "  ! Waybar config found at $WAYBAR_CONFIG"
+    echo "    Add \"custom/tomatina\" to your modules list and copy the module from:"
+    echo "    $WAYBAR_SNIPPET"
 else
-    echo "  ! Waybar config not found at $WAYBAR_CONFIG — skipping patch"
+    echo "  ! Waybar config not found at $WAYBAR_CONFIG; snippet is ready if you use Waybar later"
 fi
 
 # 5. Restart Waybar
 if command -v omarchy-restart-waybar &>/dev/null; then
     echo "  ~ Restarting Waybar..."
-    omarchy-restart-waybar
+    omarchy-restart-waybar || echo "  ! Waybar restart failed; restart it manually if needed"
 elif command -v systemctl &>/dev/null && systemctl --user status waybar &>/dev/null 2>&1; then
     echo "  ~ Restarting Waybar..."
-    systemctl --user restart waybar
+    systemctl --user restart waybar || echo "  ! Waybar restart failed; restart it manually if needed"
 fi
 
 echo ""

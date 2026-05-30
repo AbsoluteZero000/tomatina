@@ -24,7 +24,7 @@ cd tomatina
 ./install.sh
 ```
 
-This symlinks `tomatina` to `~/.local/bin/`, creates a default config, and patches your Waybar config (with backup).
+This symlinks `tomatina` to `~/.local/bin/`, creates a default config, and writes a Waybar module snippet to `~/.config/tomatina/waybar-module.jsonc`.
 
 ## Usage
 
@@ -72,6 +72,8 @@ Add to `~/.config/waybar/config.jsonc`:
     "signal": 14
 }
 ```
+
+The installer also writes this module block to `~/.config/tomatina/waybar-module.jsonc` so you can copy it without the install script rewriting your Waybar config.
 
 ### Swaybar
 
