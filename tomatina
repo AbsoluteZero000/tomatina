@@ -1,0 +1,473 @@
+#!/bin/bash
+set -e
+
+NAME="tomatina"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/${NAME}"
+STATE_FILE="$STATE_DIR/state"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/${NAME}"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+WORK_DURATION=20
+RECAP_BREAK_DURATION=5
+DEEP_BREAK_DURATION=5
+BAR="waybar"
+CMD=""
+
+# Colours (Catppuccin Mocha)
+CLR_GREEN="#a6e3a1"
+CLR_YELLOW="#f9e2af"
+CLR_BLUE="#89b4fa"
+CLR_SUBTEXT="#bac2de"
+CLR_OVERLAY="#585b70"
+
+cleanup() { rm -f "$LOCK_FILE"; }
+lock() {
+    mkdir -p "$STATE_DIR"
+    if ! ln -s "$$" "$LOCK_FILE" 2>/dev/null; then
+        local pid
+        pid=$(readlink "$LOCK_FILE" 2>/dev/null || echo 0)
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "$NAME: Another instance running (pid $pid)" >&2
+            exit 1
+        fi
+        rm -f "$LOCK_FILE"
+        ln -s "$$" "$LOCK_FILE" 2>/dev/null || true
+    fi
+    trap cleanup EXIT
+}
+
+init() {
+    mkdir -p "$STATE_DIR" "$CONFIG_DIR"
+}
+
+load_config() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    while IFS='=' read -r key value; do
+        case "$key" in
+            work_duration)          WORK_DURATION="${value:-20}" ;;
+            recap_break_duration)   RECAP_BREAK_DURATION="${value:-5}" ;;
+            deep_break_duration)    DEEP_BREAK_DURATION="${value:-5}" ;;
+            bar)                    BAR="${value:-waybar}" ;;
+            cmd)                    CMD="$value" ;;
+        esac
+    done < <(grep -v '^\s*#' "$CONFIG_FILE" 2>/dev/null | grep -v '^\s*$' || true)
+}
+
+read_state() {
+    [ -f "$STATE_FILE" ] || return 0
+    local i=0
+    while IFS= read -r line; do
+        case $i in
+            0) STATUS="${line:-idle}" ;;
+            1) REMAINING="${line:-0}" ;;
+            2) END_AT="${line:-0}" ;;
+            3) CYCLE="${line:-0}" ;;
+        esac
+        i=$((i + 1))
+    done < "$STATE_FILE"
+}
+
+write_state() {
+    printf '%s\n' "$STATUS" "$REMAINING" "$END_AT" "$CYCLE" > "$STATE_FILE"
+}
+
+cycle_name() {
+    case "${1:-0}" in
+        0) echo "working" ;;
+        1) echo "recap_break" ;;
+        2) echo "deep_break" ;;
+    esac
+}
+
+cycle_duration() {
+    case "${1:-0}" in
+        0) echo $((WORK_DURATION * 60)) ;;
+        1) echo $((RECAP_BREAK_DURATION * 60)) ;;
+        2) echo $((DEEP_BREAK_DURATION * 60)) ;;
+    esac
+}
+
+fmt_time() {
+    local s="${1:-0}"
+    [ "$s" -lt 0 ] && s=0
+    printf '%02d:%02d' $((s / 60)) $((s % 60))
+}
+
+now() { date +%s; }
+
+tick() {
+    local now_s
+    now_s=$(now)
+
+    case "$STATUS" in
+        working|recap_break|deep_break)
+            local remaining=$((END_AT - now_s))
+            if [ "$remaining" -le 0 ]; then
+                local next_cycle=$(( (CYCLE + 1) % 3 ))
+                local duration
+                duration=$(cycle_duration "$next_cycle")
+
+                if [ "$CYCLE" -eq 0 ]; then
+                    fire_cmd
+                fi
+
+                CYCLE=$next_cycle
+                STATUS=$(cycle_name "$CYCLE")
+                END_AT=$((now_s + duration))
+                remaining=$duration
+                write_state
+            fi
+            REMAINING=$remaining
+            ;;
+        paused) ;;
+        idle|*)
+            REMAINING=0
+            STATUS=idle
+            ;;
+    esac
+}
+
+fire_cmd() {
+    local cmd_to_run=""
+    if [ -f "$STATE_DIR/cmd_override" ]; then
+        cmd_to_run=$(cat "$STATE_DIR/cmd_override")
+        rm -f "$STATE_DIR/cmd_override"
+    elif [ -n "$CMD" ]; then
+        cmd_to_run="$CMD"
+    fi
+    if [ -n "$cmd_to_run" ]; then
+        eval "$cmd_to_run" &
+    fi
+}
+
+signal_bar() {
+    case "$BAR" in
+        waybar) pkill -RTMIN+14 waybar 2>/dev/null || true ;;
+    esac
+}
+
+state_color() {
+    case "$1" in
+        working)     echo "$CLR_GREEN" ;;
+        recap_break) echo "$CLR_YELLOW" ;;
+        deep_break)  echo "$CLR_BLUE" ;;
+        paused)      echo "$CLR_SUBTEXT" ;;
+        idle|*)      echo "$CLR_OVERLAY" ;;
+    esac
+}
+
+state_icon() {
+    case "$1" in
+        working)     echo "🍅" ;;
+        recap_break) echo "🔁" ;;
+        deep_break)  echo "🛌" ;;
+        paused)      echo "⏸" ;;
+        idle|*)      echo "🍅" ;;
+    esac
+}
+
+fmt_waybar() {
+    local icon text cls tip
+    icon=$(state_icon "$STATUS")
+    cls="$STATUS"
+    tip="$STATUS: $(fmt_time "$REMAINING") remaining"
+
+    if [ "$STATUS" = "idle" ]; then
+        text="$icon  --:--"
+        tip="Tomatina — idle"
+    else
+        text="$icon  $(fmt_time "$REMAINING")"
+    fi
+
+    printf '{"text":"%s","class":"%s","alt":"%s","tooltip":"%s"}\n' \
+        "$text" "$cls" "$STATUS" "$tip"
+}
+
+fmt_swaybar_block() {
+    local icon color text
+    icon=$(state_icon "$STATUS")
+    color=$(state_color "$STATUS")
+    if [ "$STATUS" = "idle" ]; then
+        text="$icon  --:--"
+    else
+        text="$icon  $(fmt_time "$REMAINING")"
+    fi
+    printf '{"name":"%s","full_text":" %s ","color":"%s","separator":true,"separator_block_width":10}' \
+        "$NAME" "$text" "$color"
+}
+
+fmt_polybar() {
+    local icon color
+    icon=$(state_icon "$STATUS")
+    color=$(state_color "$STATUS")
+    if [ "$STATUS" = "idle" ]; then
+        printf '%%{F%s}%s  --:--%%{F-}\n' "$color" "$icon"
+    else
+        printf '%%{F%s}%s  %s%%{F-}\n' "$color" "$icon" "$(fmt_time "$REMAINING")"
+    fi
+}
+
+fmt_json() {
+    printf '{"status":"%s","remaining":%s,"cycle":"%s","duration":%s}\n' \
+        "$STATUS" "$REMAINING" "$(cycle_name "$CYCLE")" "$(cycle_duration "$CYCLE")"
+}
+
+fmt_text() {
+    local icon
+    icon=$(state_icon "$STATUS")
+    if [ "$STATUS" = "idle" ]; then
+        printf 'Status: idle\n'
+    else
+        printf 'Status: %s\nRemaining: %s\nCycle: %s\n' \
+            "$STATUS" "$(fmt_time "$REMAINING")" "$(cycle_name "$CYCLE")"
+    fi
+}
+
+cmd_start() {
+    init
+    local cmd_override=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --cmd) cmd_override="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    local duration end_at
+    duration=$(cycle_duration 0)
+    end_at=$(( $(now) + duration ))
+
+    STATUS="working"
+    REMAINING=$duration
+    END_AT=$end_at
+    CYCLE=0
+    write_state
+
+    if [ -n "$cmd_override" ]; then
+        echo "$cmd_override" > "$STATE_DIR/cmd_override"
+    else
+        rm -f "$STATE_DIR/cmd_override"
+    fi
+
+    signal_bar
+    echo "🍅 $NAME: Work session started ($WORK_DURATION min)"
+}
+
+cmd_stop() {
+    init
+    STATUS="idle"; REMAINING=0; END_AT=0; CYCLE=0
+    write_state
+    rm -f "$STATE_DIR/cmd_override" 2>/dev/null || true
+    signal_bar
+    echo "$NAME: Timer stopped"
+}
+
+cmd_toggle() {
+    init
+    read_state
+
+    if [ "$STATUS" = "paused" ]; then
+        local duration
+        duration=$(cycle_duration "$CYCLE")
+        if [ "$REMAINING" -le 0 ] || [ "$REMAINING" -gt "$duration" ]; then
+            REMAINING=$duration
+        fi
+        END_AT=$(( $(now) + REMAINING ))
+        STATUS=$(cycle_name "$CYCLE")
+        write_state
+        signal_bar
+        echo "$NAME: Resumed"
+    elif [ "$STATUS" = "idle" ]; then
+        cmd_start "$@"
+    else
+        local rem=$((END_AT - $(now)))
+        [ "$rem" -lt 0 ] && rem=0
+        STATUS="paused"; REMAINING=$rem; END_AT=0
+        write_state
+        signal_bar
+        echo "$NAME: Paused"
+    fi
+}
+
+cmd_status() {
+    init
+    read_state
+    tick
+    write_state
+
+    local bar="${1:-$BAR}"
+    case "$bar" in
+        waybar)  fmt_waybar ;;
+        swaybar) fmt_swaybar_block ;;
+        polybar) fmt_polybar ;;
+        json)    fmt_json ;;
+        text)    fmt_text ;;
+        *)
+            fmt_text
+            ;;
+    esac
+}
+
+cmd_daemon() {
+    init
+    load_config
+    read_state
+
+    local bar="${1:-$BAR}"
+    local first=true
+
+    if [ "$bar" = "swaybar" ]; then
+        printf '{"version":1}\n[\n'
+        first=true
+    fi
+
+    while true; do
+        read_state
+        tick
+        write_state
+
+        case "$bar" in
+            waybar)
+                fmt_waybar
+                ;;
+            swaybar)
+                if $first; then
+                    printf '['
+                    first=false
+                else
+                    printf ',\n['
+                fi
+                fmt_swaybar_block
+                printf ']\n'
+                ;;
+            polybar)
+                fmt_polybar
+                ;;
+            json)
+                fmt_json
+                ;;
+        esac
+
+        sleep 1
+    done
+}
+
+cmd_config() {
+    init
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" <<EOF
+# Tomatina configuration
+work_duration=$WORK_DURATION
+recap_break_duration=$RECAP_BREAK_DURATION
+deep_break_duration=$DEEP_BREAK_DURATION
+bar=$BAR
+cmd=$CMD
+EOF
+    fi
+
+    local action="${1:-interactive}"
+
+    case "$action" in
+        show)
+            cat "$CONFIG_FILE"
+            ;;
+        set)
+            local key="$2" value="$3"
+            if [ -z "$key" ] || [ -z "$value" ]; then
+                echo "Usage: $NAME config set <key> <value>" >&2
+                exit 1
+            fi
+            if grep -q "^$key=" "$CONFIG_FILE" 2>/dev/null; then
+                sed -i "s|^$key=.*|$key=$value|" "$CONFIG_FILE"
+            else
+                echo "$key=$value" >> "$CONFIG_FILE"
+            fi
+            echo "$NAME: $key = $value"
+            ;;
+        interactive|"")
+            load_config
+            echo "=== $NAME Configuration ==="
+            echo "Press Enter to keep current value."
+            echo ""
+
+            local tmp
+            tmp=$(mktemp)
+            cat "$CONFIG_FILE" > "$tmp"
+
+            local input
+            read -r -p "Work duration (minutes) [$WORK_DURATION]: " input
+            [ -n "$input" ] && sed -i "s/^work_duration=.*/work_duration=$input/" "$tmp"
+            read -r -p "Recap break duration (minutes) [$RECAP_BREAK_DURATION]: " input
+            [ -n "$input" ] && sed -i "s/^recap_break_duration=.*/recap_break_duration=$input/" "$tmp"
+            read -r -p "Deep break duration (minutes) [$DEEP_BREAK_DURATION]: " input
+            [ -n "$input" ] && sed -i "s/^deep_break_duration=.*/deep_break_duration=$input/" "$tmp"
+            read -r -p "Status bar (waybar/swaybar/polybar) [$BAR]: " input
+            [ -n "$input" ] && sed -i "s/^bar=.*/bar=$input/" "$tmp"
+            read -r -p "Post-work command [$CMD]: " input
+            [ -n "$input" ] && sed -i "s|^cmd=.*|cmd=$input|" "$tmp"
+
+            mv "$tmp" "$CONFIG_FILE"
+            echo "$NAME: Configuration updated."
+            ;;
+    esac
+}
+
+show_help() {
+    cat <<EOF
+$NAME - A pomodoro-style focus timer with multi-bar support.
+
+Cycle: working → recap_break → deep_break → working → ...
+
+Usage:
+  $NAME                           Daemon mode (continuous bar output)
+  $NAME start [--cmd <command>]   Start a work session
+  $NAME stop                      Stop timer and reset to idle
+  $NAME toggle                    Pause/resume current session
+  $NAME status [--bar <type>]     Show current status
+  $NAME daemon [--bar <type>]     Run timer daemon with bar output
+  $NAME config                    Interactive configuration
+  $NAME config show               Show current configuration
+  $NAME config set <key> <val>    Set a configuration value
+  $NAME help                      Show this help
+
+Bar types: waybar, swaybar, polybar, json
+
+Post-work command (--cmd):
+  Runs when the work phase ends (before recap_break).
+  Example: tomatina start --cmd "safeeyes --take-break"
+
+Configuration ($CONFIG_FILE):
+  work_duration=<minutes>          Default: $WORK_DURATION
+  recap_break_duration=<minutes>   Default: $RECAP_BREAK_DURATION
+  deep_break_duration=<minutes>    Default: $DEEP_BREAK_DURATION
+  bar=<waybar|swaybar|polybar>     Default: $BAR
+  cmd=<command>                    Default: (none)
+EOF
+}
+
+main() {
+    init
+    load_config
+
+    case "${1:-}" in
+        start)   shift; cmd_start "$@" ;;
+        stop)    cmd_stop ;;
+        toggle)  shift; cmd_toggle "$@" ;;
+        status)  shift; cmd_status "$@" ;;
+        daemon)  shift; cmd_daemon "$@" ;;
+        config)  shift; cmd_config "$@" ;;
+        help|--help|-h) show_help ;;
+        '')
+            # Read bar from config; default to waybar
+            local b="${BAR:-waybar}"
+            cmd_daemon "$b"
+            ;;
+        *)
+            echo "$NAME: Unknown command '$1'. Use '$NAME help' for usage." >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
