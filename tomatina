@@ -295,7 +295,13 @@ cmd_status() {
     tick
     write_state
 
-    local bar="${1:-$BAR}"
+    local bar="$BAR"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --bar) bar="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
     case "$bar" in
         waybar)  fmt_waybar ;;
         swaybar) fmt_swaybar_block ;;
@@ -313,7 +319,13 @@ cmd_daemon() {
     load_config
     read_state
 
-    local bar="${1:-$BAR}"
+    local bar="$BAR"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --bar) bar="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
     local first=true
 
     if [ "$bar" = "swaybar" ]; then
