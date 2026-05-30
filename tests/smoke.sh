@@ -59,7 +59,10 @@ HOME="$TMP_DIR/install-home" \
 XDG_CONFIG_HOME="$TMP_DIR/install-home/.config" \
 PATH="$TMP_DIR/fakebin:$PATH" \
     "$ROOT_DIR/install.sh" >/dev/null
-cmp "$TMP_DIR/original-waybar.jsonc" "$TMP_DIR/install-home/.config/waybar/config.jsonc"
+grep -q '"custom/tomatina"' "$TMP_DIR/install-home/.config/waybar/config.jsonc"
+grep -q '"format": "{}  "' "$TMP_DIR/install-home/.config/waybar/config.jsonc"
+test -f "$TMP_DIR/install-home/.config/waybar/config.jsonc.bak.tomatina"
+cmp "$TMP_DIR/original-waybar.jsonc" "$TMP_DIR/install-home/.config/waybar/config.jsonc.bak.tomatina"
 test -f "$TMP_DIR/install-home/.config/tomatina/waybar-module.jsonc"
 
 echo "smoke tests passed"

@@ -11,6 +11,80 @@ CONFIG_FILE="$CONFIG_DIR/config"
 WAYBAR_CONFIG="${HOME}/.config/waybar/config.jsonc"
 WAYBAR_SNIPPET="$CONFIG_DIR/waybar-module.jsonc"
 
+patch_waybar_config() {
+    local config="$1"
+
+    if ! command -v python3 &>/dev/null; then
+        echo "  ! python3 not found; add Waybar snippet manually from $WAYBAR_SNIPPET"
+        return 0
+    fi
+
+    WAYBAR_CONFIG_PATH="$config" python3 <<'PY'
+import os
+import re
+import shutil
+import sys
+
+path = os.environ["WAYBAR_CONFIG_PATH"]
+with open(path, "r", encoding="utf-8") as fh:
+    text = fh.read()
+
+module = '''  "custom/tomatina": {
+    "exec": "$HOME/.local/bin/tomatina status --bar waybar",
+    "return-type": "json",
+    "format": "{}  ",
+    "on-click": "$HOME/.local/bin/tomatina toggle",
+    "on-click-right": "$HOME/.local/bin/tomatina stop",
+    "signal": 14,
+    "interval": 1
+  }'''
+
+changed = False
+
+modules_re = re.compile(r'("modules-right"\s*:\s*\[)(.*?)(\n\s*\])', re.S)
+match = modules_re.search(text)
+if match:
+    body = match.group(2)
+    if '"custom/tomatina"' not in body:
+        lines = [line for line in body.splitlines() if line.strip()]
+        if lines:
+            lines = [re.sub(r',\s*$', '', line) for line in lines]
+            new_body = '\n    "custom/tomatina",\n' + ',\n'.join(lines)
+        else:
+            new_body = '\n    "custom/tomatina"'
+        text = text[:match.start()] + match.group(1) + new_body + match.group(3) + text[match.end():]
+        changed = True
+else:
+    print("modules-right not found; add custom/tomatina manually", file=sys.stderr)
+
+if '"custom/tomatina"' in text and re.search(r'"custom/tomatina"\s*:\s*\{', text):
+    module_re = re.compile(r'\n\s*"custom/tomatina"\s*:\s*\{.*?\n\s*\}', re.S)
+    text, count = module_re.subn('\n' + module, text, count=1)
+    changed = changed or count > 0
+else:
+    stripped = text.rstrip()
+    if stripped.endswith("}"):
+        prefix = stripped[:-1].rstrip()
+        if prefix.endswith("{"):
+            text = prefix + "\n" + module + "\n}\n"
+        else:
+            text = prefix + ",\n" + module + "\n}\n"
+        changed = True
+    else:
+        print("Could not find final object brace; add custom/tomatina manually", file=sys.stderr)
+
+if changed:
+    backup = path + ".bak.tomatina"
+    if not os.path.exists(backup):
+        shutil.copy2(path, backup)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    print(f"patched {path} (backup: {backup})")
+else:
+    print(f"{path} already has custom/tomatina")
+PY
+}
+
 if [ ! -f "$SCRIPT_SRC" ]; then
     echo "Error: $SCRIPT_SRC not found. Run this script from the repo directory." >&2
     exit 1
@@ -57,25 +131,31 @@ if grep -q "^bar=" "$CONFIG_FILE" 2>/dev/null; then
     fi
 fi
 
-# 4. Write Waybar snippet and print integration instructions
+# 4. Write Waybar snippet and patch Waybar config when available
 cat > "$WAYBAR_SNIPPET" <<'MODULE'
     "custom/tomatina": {
-        "exec": "$HOME/.local/bin/tomatina",
+        "exec": "$HOME/.local/bin/tomatina status --bar waybar",
         "return-type": "json",
-        "format": "{}",
+        "format": "{}  ",
         "on-click": "$HOME/.local/bin/tomatina toggle",
         "on-click-right": "$HOME/.local/bin/tomatina stop",
-        "signal": 14
+        "signal": 14,
+        "interval": 1
     }
 MODULE
 echo "  + Wrote Waybar module snippet: $WAYBAR_SNIPPET"
 
-if [ -f "$WAYBAR_CONFIG" ] && grep -q '"custom/tomatina"' "$WAYBAR_CONFIG" 2>/dev/null; then
-    echo "  ~ Waybar module already exists in $WAYBAR_CONFIG"
-elif [ -f "$WAYBAR_CONFIG" ]; then
-    echo "  ! Waybar config found at $WAYBAR_CONFIG"
-    echo "    Add \"custom/tomatina\" to your modules list and copy the module from:"
-    echo "    $WAYBAR_SNIPPET"
+if [ -f "$WAYBAR_CONFIG" ]; then
+    echo "  ~ Patching Waybar config: $WAYBAR_CONFIG"
+    if patch_output=$(patch_waybar_config "$WAYBAR_CONFIG" 2>&1); then
+        while IFS= read -r line; do
+            [ -n "$line" ] && echo "    $line"
+        done <<< "$patch_output"
+    else
+        echo "  ! Could not patch Waybar config automatically"
+        echo "$patch_output" | sed 's/^/    /'
+        echo "    Add \"custom/tomatina\" manually and copy the module from $WAYBAR_SNIPPET"
+    fi
 else
     echo "  ! Waybar config not found at $WAYBAR_CONFIG; snippet is ready if you use Waybar later"
 fi
