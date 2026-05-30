@@ -46,8 +46,11 @@ mkdir -p "$TMP_DIR/install-home/.config/waybar" "$TMP_DIR/fakebin"
 cat > "$TMP_DIR/install-home/.config/waybar/config.jsonc" <<'JSON'
 {
   "layer": "top",
-  "modules-right": [
+  "modules-center": [
     "clock"
+  ],
+  "modules-right": [
+    "network"
   ]
 }
 JSON
@@ -60,6 +63,8 @@ XDG_CONFIG_HOME="$TMP_DIR/install-home/.config" \
 PATH="$TMP_DIR/fakebin:$PATH" \
     "$ROOT_DIR/install.sh" >/dev/null
 grep -q '"custom/tomatina"' "$TMP_DIR/install-home/.config/waybar/config.jsonc"
+grep -A3 '"modules-center"' "$TMP_DIR/install-home/.config/waybar/config.jsonc" | grep -q '"custom/tomatina"'
+grep -A3 '"modules-right"' "$TMP_DIR/install-home/.config/waybar/config.jsonc" | grep -q '"network"'
 grep -q '"format": "{}  "' "$TMP_DIR/install-home/.config/waybar/config.jsonc"
 test -f "$TMP_DIR/install-home/.config/waybar/config.jsonc.bak.tomatina"
 cmp "$TMP_DIR/original-waybar.jsonc" "$TMP_DIR/install-home/.config/waybar/config.jsonc.bak.tomatina"

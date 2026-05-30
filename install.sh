@@ -41,7 +41,7 @@ module = '''  "custom/tomatina": {
 
 changed = False
 
-modules_re = re.compile(r'("modules-right"\s*:\s*\[)(.*?)(\n\s*\])', re.S)
+modules_re = re.compile(r'("modules-center"\s*:\s*\[)(.*?)(\n\s*\])', re.S)
 match = modules_re.search(text)
 if match:
     body = match.group(2)
@@ -55,7 +55,7 @@ if match:
         text = text[:match.start()] + match.group(1) + new_body + match.group(3) + text[match.end():]
         changed = True
 else:
-    print("modules-right not found; add custom/tomatina manually", file=sys.stderr)
+    print("modules-center not found; add custom/tomatina manually", file=sys.stderr)
 
 if '"custom/tomatina"' in text and re.search(r'"custom/tomatina"\s*:\s*\{', text):
     module_re = re.compile(r'\n\s*"custom/tomatina"\s*:\s*\{.*?\n\s*\}', re.S)
